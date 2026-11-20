@@ -1,0 +1,70 @@
+name: Build Amazon Fire TV Cube APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: "Soul's Channel Live URL (optional - leave blank to use default)"
+        required: false
+        default: ""
+  push:
+    paths:
+      - 'firetv-android/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build-firetv-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Apply custom Soul's Channel URL (if provided)
+        if: ${{ github.event.inputs.server_url != '' }}
+        run: |
+          URL="${{ github.event.inputs.server_url }}"
+          sed -i "s|<string name=\"default_server_url\">.*</string>|<string name=\"default_server_url\">${URL}</string>|" firetv-android/app/src/main/res/values/strings.xml
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Fire TV Cube APK
+        working-directory: firetv-android
+        run: gradle assembleRelease
+
+      - name: Rename APK for Fire TV Sideloading
+        run: |
+          cp firetv-android/app/build/outputs/apk/release/app-release.apk Souls-Channel-FireTV.apk
+
+      - name: Upload Souls-Channel-FireTV.apk Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Souls-Channel-FireTV-APK
+          path: Souls-Channel-FireTV.apk
+          retention-days: 90
+
+      - name: Publish Direct Download APK Release (for Fire TV Downloader & TV Bro)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="firetv-latest"
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+          gh release create "$TAG" Souls-Channel-FireTV.apk \
+            --title "Soul's Channel for Amazon Fire TV Cube" \
+            --notes "Direct installable APK for Amazon Fire TV Cube." \
+            --latest
