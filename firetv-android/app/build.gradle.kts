@@ -12,8 +12,8 @@ android {
         // Fire OS 7 (Android 9 / API 28) & Fire OS 8 (Android 11 / API 30) — Fire TV Cube Gen 2 & Gen 3
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "2.4.1"
+        versionCode = 26
+        versionName = "2.4.2"
     }
 
     buildTypes {

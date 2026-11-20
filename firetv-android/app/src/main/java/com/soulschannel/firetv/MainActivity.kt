@@ -1,20 +1,26 @@
 package com.soulschannel.firetv
 
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
 import android.view.KeyEvent
-import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.MediaItem
@@ -27,6 +33,7 @@ import androidx.media3.ui.PlayerView
  *
  * - Optimised for 10-foot TV display & Amazon Fire TV Alexa Voice Remote (zero keyboard/mouse needed)
  * - Hardware-accelerated Media3 ExoPlayer bridge for Fire TV Cube HLS/M3U8 & 4K playback
+ * - Built-in Fire TV Server URL setup (auto-opens on 404/connection error or via remote Menu ☰ button)
  * - Strict Security Sandbox: blocks pop-ups, external downloads, file-system access, and untrusted navigation
  */
 class MainActivity : AppCompatActivity() {
@@ -36,8 +43,12 @@ class MainActivity : AppCompatActivity() {
     private var nativePlayerView: PlayerView? = null
     private var exoPlayer: ExoPlayer? = null
     private var allowedOriginHost: String = ""
+    private var currentServerUrl: String = ""
+    private var urlDialogShowing: Boolean = false
 
     companion object {
+        private const val PREFS_NAME = "souls_channel_tv"
+        private const val KEY_SERVER_URL = "server_url"
         private val BLOCKED_DOWNLOAD_REGEX =
             Regex("""\.(exe|msi|apk|aab|xapk|bat|cmd|ps1|vbs|scr|dmg|pkg|sh|jar|zip|rar)(\?|#|$)""", RegexOption.IGNORE_CASE)
     }
@@ -49,10 +60,10 @@ class MainActivity : AppCompatActivity() {
         // Keep TV screen awake during playback
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val prefs = getSharedPreferences("souls_channel_tv", MODE_PRIVATE)
-        val serverUrl = prefs.getString("server_url", getString(R.string.default_server_url))
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        currentServerUrl = prefs.getString(KEY_SERVER_URL, getString(R.string.default_server_url))
             ?: getString(R.string.default_server_url)
-        allowedOriginHost = Uri.parse(serverUrl).host?.lowercase().orEmpty()
+        allowedOriginHost = Uri.parse(currentServerUrl).host?.lowercase().orEmpty()
 
         rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#090B10"))
@@ -85,9 +96,9 @@ class MainActivity : AppCompatActivity() {
             allowUniversalAccessFromFileURLs = false
             javaScriptCanOpenWindowsAutomatically = false
             setSupportMultipleWindows(false)
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             cacheMode = WebSettings.LOAD_DEFAULT
-            userAgentString = "$userAgentString SoulsChannelFireTV/1.0 AFTCube"
+            userAgentString = "$userAgentString SoulsChannelFireTV/2.4 AFTCube"
         }
 
         // Block all automatic software downloads from streaming sources
@@ -113,14 +124,125 @@ class MainActivity : AppCompatActivity() {
                 // Keep top-level navigation strictly locked to Soul's Channel server origin
                 return host != allowedOriginHost
             }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: WebResourceResponse?
+            ) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (request?.isForMainFrame == true) {
+                    val code = errorResponse?.statusCode ?: 0
+                    if (code >= 400) {
+                        runOnUiThread {
+                            showServerUrlDialog(
+                                "The current Soul's Channel URL returned HTTP $code (Not Found / Unavailable).\n\n" +
+                                    "Enter your live Deployed Cloud Run URL (https://...run.app/?tv=1) " +
+                                    "or your Windows PC Wi-Fi URL (http://192.168.x.x:3000/?tv=1)."
+                            )
+                        }
+                    }
+                }
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame == true) {
+                    runOnUiThread {
+                        showServerUrlDialog(
+                            "Could not connect to Soul's Channel at:\n$currentServerUrl\n\n" +
+                                "Enter your live Deployed URL (https://...run.app/?tv=1) " +
+                                "or your Windows PC Wi-Fi URL (http://192.168.x.x:3000/?tv=1)."
+                        )
+                    }
+                }
+            }
         }
 
         webView.addJavascriptInterface(FireTvBridge(), "FireTvNative")
         rootLayout.addView(webView)
         setContentView(rootLayout)
 
-        webView.loadUrl(serverUrl)
+        loadServerUrl(currentServerUrl)
         webView.requestFocus()
+    }
+
+    private fun normalizeServerUrl(raw: String): String {
+        var clean = raw.trim()
+        if (clean.isEmpty()) return currentServerUrl
+        if (!clean.startsWith("http://", ignoreCase = true) && !clean.startsWith("https://", ignoreCase = true)) {
+            clean = if (clean.startsWith("192.168.") || clean.startsWith("10.") || clean.startsWith("172.")) {
+                "http://$clean"
+            } else {
+                "https://$clean"
+            }
+        }
+        if (!clean.contains("tv=1")) {
+            clean = if (clean.contains("?")) "$clean&tv=1" else "${clean.trimEnd('/')}/?tv=1"
+        }
+        return clean
+    }
+
+    private fun loadServerUrl(url: String) {
+        val normalized = normalizeServerUrl(url)
+        currentServerUrl = normalized
+        allowedOriginHost = Uri.parse(normalized).host?.lowercase().orEmpty()
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(KEY_SERVER_URL, normalized)
+            .apply()
+        webView.loadUrl(normalized)
+    }
+
+    private fun showServerUrlDialog(message: String) {
+        if (urlDialogShowing || isFinishing) return
+        urlDialogShowing = true
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 28, 48, 12)
+        }
+
+        val info = TextView(this).apply {
+            text = message
+            textSize = 14f
+            setPadding(0, 0, 0, 20)
+        }
+
+        val input = EditText(this).apply {
+            setText(currentServerUrl)
+            hint = "https://your-souls-channel-url.run.app/?tv=1"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            isSingleLine = true
+            setSelectAllOnFocus(true)
+        }
+
+        container.addView(info)
+        container.addView(input)
+
+        AlertDialog.Builder(this)
+            .setTitle("Soul's Channel — Server URL")
+            .setView(container)
+            .setCancelable(true)
+            .setPositiveButton("Connect") { _, _ ->
+                urlDialogShowing = false
+                loadServerUrl(input.text?.toString().orEmpty())
+            }
+            .setNeutralButton("Retry") { _, _ ->
+                urlDialogShowing = false
+                webView.reload()
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                urlDialogShowing = false
+            }
+            .setOnDismissListener {
+                urlDialogShowing = false
+            }
+            .show()
     }
 
     /**
@@ -129,6 +251,13 @@ class MainActivity : AppCompatActivity() {
     inner class FireTvBridge {
         @JavascriptInterface
         fun isFireTv(): Boolean = true
+
+        @JavascriptInterface
+        fun openServerSettings() {
+            runOnUiThread {
+                showServerUrlDialog("Update your Soul's Channel server URL below (press Menu ☰ on your remote anytime to open this).")
+            }
+        }
 
         @JavascriptInterface
         @OptIn(UnstableApi::class)
@@ -187,6 +316,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Pressing Fire TV Remote Menu (☰) opens Server URL settings anytime
+        if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_MENU) {
+            showServerUrlDialog("Change your Soul's Channel URL (Deployed Cloud Run URL or local Windows PC IP):")
+            return true
+        }
+
         // When native Fire TV ExoPlayer is open, Back closes it cleanly back to Soul's Channel
         if (nativePlayerView != null) {
             if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_BACK) {
